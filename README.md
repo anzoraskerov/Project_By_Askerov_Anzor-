@@ -3,8 +3,6 @@ the micro services for docker containers
 
 ```mermaid
 classDiagram
-    direction LR
-
     class APIGateway {
         +startHttpServer(host: str, port: int): None
         +handleHttpRequest(request: HttpRequest): HttpResponse
