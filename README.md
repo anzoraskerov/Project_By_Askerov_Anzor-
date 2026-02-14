@@ -135,6 +135,216 @@
 - Add CI/CD pipeline for build, test, and deploy
 
 ---
+
+# Docker Compose Planning
+
+---
+
+# Proto Code Generation Dockerfile
+
+To generate Python and Go code from your .proto files for all services, use the following multi-stage Dockerfile (Dockerfile.proto):
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim AS proto-py-builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git curl unzip build-essential && \
+    pip install --no-cache-dir grpcio-tools
+
+WORKDIR /proto
+
+# Copy your .proto files into /proto
+COPY ./proto ./proto
+
+# Generate Python code from proto
+RUN python -m grpc_tools.protoc -I. --python_out=./gen/py --grpc_python_out=./gen/py *.proto
+
+# ---
+FROM golang:1.21 AS proto-go-builder
+
+WORKDIR /proto
+
+# Install protoc and Go plugins
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git curl unzip && \
+    curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v24.4/protoc-24.4-linux-x86_64.zip && \
+    unzip protoc-24.4-linux-x86_64.zip -d /usr/local && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# Copy your .proto files into /proto
+COPY ./proto ./proto
+
+# Generate Go code from proto
+RUN /usr/local/bin/protoc -I. --go_out=./gen/go --go-grpc_out=./gen/go *.proto
+
+# ---
+FROM alpine:3.18 AS final
+WORKDIR /out
+COPY --from=proto-py-builder /proto/gen/py ./py
+COPY --from=proto-go-builder /proto/gen/go ./go
+
+# Result: /out/py and /out/go contain generated code
+```
+
+## Usage
+
+1. Place all your `.proto` files in a `proto/` directory at the project root.
+2. Build the Docker image:
+   ```sh
+   docker build -f Dockerfile.proto -t proto-gen .
+   ```
+3. Copy the generated code from the container:
+   ```sh
+   docker cp $(docker create proto-gen):/out ./generated
+   ```
+4. Use the generated Python and Go code in your respective services.
+
+## Overview
+
+The system will use a single `docker-compose.yml` to orchestrate all microservices, databases, and supporting infrastructure. Each service (API Gateway, Auth, Orders, Notifications) will have its own MongoDB instance. RabbitMQ will be used as the message broker. All services will be connected via a shared Docker network.
+
+## Services to Define in docker-compose.yml
+
+1. **api-gateway**
+        - Build from ./api-gateway (FastAPI)
+        - Depends on: auth, orders
+        - Environment: points to gRPC endpoints, MongoDB (if needed)
+        - Ports: 443 (HTTPS)
+
+2. **auth**
+        - Build from ./auth (Go)
+        - Depends on: auth-mongo, rabbitmq
+        - Environment: MongoDB URI, RabbitMQ URI
+        - Ports: 50051 (gRPC), 443 (HTTPS)
+
+3. **auth-mongo**
+        - Image: mongo:latest
+        - Ports: 27017
+        - Volumes: ./data/auth-mongo:/data/db
+
+4. **orders**
+        - Build from ./orders (FastAPI or Go)
+        - Depends on: orders-mongo, rabbitmq
+        - Environment: MongoDB URI, RabbitMQ URI
+        - Ports: 50052 (gRPC), 443 (HTTPS)
+
+5. **orders-mongo**
+        - Image: mongo:latest
+        - Ports: 27018
+        - Volumes: ./data/orders-mongo:/data/db
+
+6. **notifications**
+        - Build from ./notifications (FastAPI)
+        - Depends on: rabbitmq
+        - Environment: RabbitMQ URI
+        - Ports: 8000 (HTTPS/SSE)
+
+7. **rabbitmq**
+        - Image: rabbitmq:3-management
+        - Ports: 5672 (AMQP), 15672 (management UI)
+        - Volumes: ./data/rabbitmq:/var/lib/rabbitmq
+
+## Example docker-compose.yml Structure
+
+```yaml
+version: '3.8'
+services:
+    api-gateway:
+        build: ./api-gateway
+        ports:
+            - "443:443"
+        depends_on:
+            - auth
+            - orders
+        environment:
+            # ...
+        networks:
+            - backend
+
+    auth:
+        build: ./auth
+        ports:
+            - "50051:50051"
+            - "444:443"
+        depends_on:
+            - auth-mongo
+            - rabbitmq
+        environment:
+            MONGO_URI: mongodb://auth-mongo:27017
+            RABBITMQ_URI: amqp://guest:guest@rabbitmq:5672/
+        networks:
+            - backend
+
+    auth-mongo:
+        image: mongo:latest
+        ports:
+            - "27017:27017"
+        volumes:
+            - ./data/auth-mongo:/data/db
+        networks:
+            - backend
+
+    orders:
+        build: ./orders
+        ports:
+            - "50052:50052"
+            - "445:443"
+        depends_on:
+            - orders-mongo
+            - rabbitmq
+        environment:
+            MONGO_URI: mongodb://orders-mongo:27017
+            RABBITMQ_URI: amqp://guest:guest@rabbitmq:5672/
+        networks:
+            - backend
+
+    orders-mongo:
+        image: mongo:latest
+        ports:
+            - "27018:27017"
+        volumes:
+            - ./data/orders-mongo:/data/db
+        networks:
+            - backend
+
+    notifications:
+        build: ./notifications
+        ports:
+            - "8000:8000"
+        depends_on:
+            - rabbitmq
+        environment:
+            RABBITMQ_URI: amqp://guest:guest@rabbitmq:5672/
+        networks:
+            - backend
+
+    rabbitmq:
+        image: rabbitmq:3-management
+        ports:
+            - "5672:5672"
+            - "15672:15672"
+        volumes:
+            - ./data/rabbitmq:/var/lib/rabbitmq
+        networks:
+            - backend
+
+networks:
+    backend:
+        driver: bridge
+```
+
+## Notes
+- Each service has its own MongoDB instance and persistent volume.
+- All services are on the same Docker network for easy service discovery.
+- Environment variables are used for service configuration.
+- HTTPS certificates should be mounted or generated for each service.
+- Add more services or databases as needed following this pattern.
+
+---
 ## Notifications Service
 
 - Built with FastAPI
