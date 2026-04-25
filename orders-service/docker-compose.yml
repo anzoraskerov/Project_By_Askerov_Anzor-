@@ -1,0 +1,42 @@
+version: '3.8'   
+
+services:
+  mongodb-container:
+    image: bitnami/mongodb:latest
+    container_name: mongodb-container
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGODB_ROOT_USER: root
+      MONGODB_ROOT_PASSWORD: rootpassword
+      
+    volumes:
+      - mongodb_data:/bitnami/mongodb/data
+    networks:
+      - orders-network
+
+  order-containers:
+    build:
+      context: .
+      dockerfile: Dockerfile.src
+    container_name: order-containers
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb-container
+    volumes:
+      - ./src:/app
+    environment:
+      
+      MONGO_URL: mongodb://root:rootpassword@mongodb-container:27017/orders_db?authSource=admin
+    networks:
+      - orders-network
+
+volumes:
+  mongodb_data:
+
+networks:
+  orders-network:
+    driver: bridge
